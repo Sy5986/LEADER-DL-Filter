@@ -31,17 +31,16 @@ def set_korean_font():
 set_korean_font()
 
 # ============================================================
-# 설정
+# 설정 (상수)
 # ============================================================
-SUPABASE_URL = 'https://qdyzkekzjrzaupeplyxv.supabase.co'
-SUPABASE_KEY = 'sb_secret_u1wuZY958fWHkqTX1qDGfw_tCQQYy7A'
-USE_SUPABASE = True
+SUPABASE_URL    = 'https://qdyzkekzjrzaupeplyxv.supabase.co'
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', 'sb_secret_u1wuZY958fWHkqTX1qDGfw_tCQQYy7A')
+USE_SUPABASE    = True
 LOOKBACK        = 20
 FUTURE_DAYS     = 5
 RISE_THRESHOLD  = 0.03
 TRAIN_YEARS     = 5
 TEST_RATIO      = 0.2
-THRESHOLD_PRED  = 0.7
 MODEL_PATH      = 'leader_dl_model.keras'
 SCALER_PATH     = 'leader_scalers.pkl'
 PORTFOLIO_PATH  = 'portfolio.json'
@@ -64,6 +63,52 @@ DEFAULT_STOCKS = {
     '082740': '한화엔진',
     '006340': '대원전선',
 }
+
+# ============================================================
+# 사이드바 — 임계값 슬라이더 (전역 session_state로 관리)
+# ============================================================
+with st.sidebar:
+    st.header('⚙️ 설정')
+    st.info('최초 실행 시 학습이 진행됩니다. (약 3~5분)')
+
+    THRESHOLD_PRED = st.slider(
+        '📊 매수 신호 임계값',
+        min_value=0.50, max_value=0.95,
+        value=st.session_state.get('threshold', 0.70),
+        step=0.05,
+        format='%.2f',
+        help='높을수록 신호 횟수는 줄지만 정확도가 올라갑니다'
+    )
+    st.session_state['threshold'] = THRESHOLD_PRED
+    st.caption(f'현재 임계값: **{THRESHOLD_PRED*100:.0f}%**')
+
+    st.divider()
+
+    # ── 백테스트 손절 파라미터 ──
+    st.subheader('🧪 백테스트 파라미터')
+    BT_ATR_MULT = st.slider(
+        'ATR 손절 배수',
+        min_value=1.0, max_value=4.0,
+        value=st.session_state.get('atr_mult', 2.0),
+        step=0.5,
+        help='ATR × 배수 = 손절가. 기본값 2.0 (터틀 트레이딩 기준)'
+    )
+    st.session_state['atr_mult'] = BT_ATR_MULT
+
+    BT_GAP_SLIP = st.checkbox(
+        '갭다운 시가 체결 반영',
+        value=st.session_state.get('gap_slip', True),
+        help='손절 당일 시가가 손절가보다 낮으면 시가로 체결 (실전 반영)'
+    )
+    st.session_state['gap_slip'] = BT_GAP_SLIP
+
+    st.divider()
+
+    if st.button('🔄 모델 재학습', type='secondary', use_container_width=True):
+        for f in [MODEL_PATH, SCALER_PATH]:
+            if os.path.exists(f): os.remove(f)
+        st.cache_resource.clear()
+        st.rerun()
 
 # ============================================================
 # 포트폴리오 관리
@@ -183,6 +228,7 @@ def make_sequences(df, lookback, future_days, threshold):
         y.append(labels.iloc[i])
         dates.append(d.index[i])
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32), dates
+
 @st.cache_resource
 def get_supabase():
     from supabase import create_client
@@ -268,7 +314,6 @@ def load_model_and_data():
         model = tf.keras.models.load_model(MODEL_PATH)
         with open(SCALER_PATH, 'rb') as f:
             scalers = pickle.load(f)
-        # featured_data / raw_data 재구성
         featured_data, raw_data = {}, {}
         for code in trained_stocks:
             try:
@@ -299,7 +344,8 @@ def get_predictions(df, code, model, scalers):
     probs   = model.predict(X, verbose=0).flatten()
     return pd.DatetimeIndex(dates), probs, probs >= THRESHOLD_PRED
 
-def calc_turtle(df_raw):
+def calc_turtle(df_raw, atr_mult=2.0):
+    """터틀 트레이딩 손절 계산. atr_mult: ATR 손절 배수"""
     tr = pd.concat([
         df_raw['high'] - df_raw['low'],
         (df_raw['high'] - df_raw['close'].shift()).abs(),
@@ -307,10 +353,10 @@ def calc_turtle(df_raw):
     ], axis=1).max(axis=1)
     atr14      = tr.rolling(14).mean().iloc[-1]
     close_now  = df_raw['close'].iloc[-1]
-    stop_atr   = close_now - 2 * atr14
+    stop_atr   = close_now - atr_mult * atr14
     stop_10low = df_raw['low'].tail(10).min()
     stop_20low = df_raw['low'].tail(20).min()
-    unit       = int(10_000_000 * 0.01 / (2 * atr14)) if atr14 > 0 else 0
+    unit       = int(10_000_000 * 0.01 / (atr_mult * atr14)) if atr14 > 0 else 0
     return close_now, atr14, stop_atr, stop_10low, stop_20low, unit
 
 # ============================================================
@@ -380,7 +426,7 @@ def draw_chart(df, code, name, start_dt, end_dt, model, scalers):
         ax2r.plot(prob_xs,prob_vals,color='#9B59B6',linewidth=1.8,label='매수확률')
         ax2r.fill_between(prob_xs,THRESHOLD_PRED,prob_vals,
                           where=[v>=THRESHOLD_PRED for v in prob_vals],alpha=0.2,color='#E74C3C')
-    ax2r.axhline(THRESHOLD_PRED,color='#E74C3C',linestyle='--',linewidth=1.2,label=f'임계값{THRESHOLD_PRED*100:.0f}%')
+    ax2r.axhline(THRESHOLD_PRED,color='#E74C3C',linestyle='--',linewidth=1.2,label=f'임계값 {THRESHOLD_PRED*100:.0f}%')
     ax2r.set_ylim(0,1); ax2r.set_ylabel('매수확률',fontsize=10,color='#9B59B6')
     ax2r.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x,_: f'{x:.0%}'))
     ax2r.tick_params(axis='y',labelcolor='#9B59B6')
@@ -402,6 +448,7 @@ def draw_chart(df, code, name, start_dt, end_dt, model, scalers):
 
 def draw_turtle_chart(df_raw, code, name, model, scalers):
     from sklearn.preprocessing import StandardScaler
+    atr_mult = st.session_state.get('atr_mult', 2.0)
     df_feat = add_features(df_raw)
     d = df_feat[FEATURE_COLS].dropna()
     sc = StandardScaler()
@@ -424,7 +471,7 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
     prob_map_20 = dict(zip(dates_20, probs_20))
     buy_xs_20    = [dt_to_x[dt] for dt in dates_20[signals_20] if dt in dt_to_x]
     buy_prices_20= [df_20['close'].iloc[dt_to_x[dt]]*0.982 for dt in dates_20[signals_20] if dt in dt_to_x]
-    close_now, atr14, stop_atr, stop_10low, stop_20low, unit = calc_turtle(df_raw)
+    close_now, atr14, stop_atr, stop_10low, stop_20low, unit = calc_turtle(df_raw, atr_mult)
     latest_prob   = probs[-1]
     latest_signal = '🟢 매수 신호' if latest_prob >= THRESHOLD_PRED else '🔴 비신호'
 
@@ -445,7 +492,8 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
                     label=f'매수신호({len(buy_xs_20)}회)',edgecolors='white',linewidths=0.8)
         for bx in buy_xs_20:
             ax1.axvspan(bx-0.5,bx+0.5,alpha=0.1,color='#E74C3C',zorder=0)
-    ax1.axhline(stop_atr,  color='#E67E22',linestyle='--',linewidth=1.5,label=f'ATR손절 {int(stop_atr):,}원')
+    ax1.axhline(stop_atr,  color='#E67E22',linestyle='--',linewidth=1.5,
+                label=f'ATR×{atr_mult:.1f} 손절 {int(stop_atr):,}원')
     ax1.axhline(stop_10low,color='#E74C3C',linestyle=':',linewidth=1.8,label=f'10일최저 {int(stop_10low):,}원')
     ax1.axhline(stop_20low,color='#8E44AD',linestyle=':',linewidth=1.5,label=f'20일최저 {int(stop_20low):,}원')
     y_bot = min(df_20['low'].min()*0.97, stop_atr*0.99)
@@ -467,7 +515,7 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
         ax2r.plot(prob_xs_20,prob_vals_20,color='#9B59B6',linewidth=1.8,label='매수확률')
         ax2r.fill_between(prob_xs_20,THRESHOLD_PRED,prob_vals_20,
                           where=[v>=THRESHOLD_PRED for v in prob_vals_20],alpha=0.2,color='#E74C3C')
-    ax2r.axhline(THRESHOLD_PRED,color='#E74C3C',linestyle='--',linewidth=1.2,label=f'임계값{THRESHOLD_PRED*100:.0f}%')
+    ax2r.axhline(THRESHOLD_PRED,color='#E74C3C',linestyle='--',linewidth=1.2,label=f'임계값 {THRESHOLD_PRED*100:.0f}%')
     ax2r.set_ylim(0,1); ax2r.set_ylabel('매수확률',fontsize=10,color='#9B59B6')
     ax2r.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x,_: f'{x:.0%}'))
     ax2r.tick_params(axis='y',labelcolor='#9B59B6')
@@ -482,7 +530,7 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
         st.metric('ATR(14)',f'{int(atr14):,}원')
         st.metric('딥러닝 판정',latest_signal,f'{latest_prob:.1%}')
     with c2:
-        st.metric('① ATR 2배 손절',f'{int(stop_atr):,}원',
+        st.metric(f'① ATR×{atr_mult:.1f} 손절',f'{int(stop_atr):,}원',
                   f'-{(close_now-stop_atr)/close_now*100:.1f}%',delta_color='inverse')
         st.metric('② 10일 최저가 손절',f'{int(stop_10low):,}원',
                   f'-{(close_now-stop_10low)/close_now*100:.1f}%',delta_color='inverse')
@@ -511,14 +559,11 @@ def _run_analysis(new_code, new_name, model, scalers, featured_data):
         try:
             df_raw = get_raw_data(new_code)
             st.success(f'✅ {len(df_raw)}일치 수집 완료')
-            result = draw_turtle_chart(df_raw, new_code, new_name, model, scalers)
-
-            # 학습 데이터에 추가
+            draw_turtle_chart(df_raw, new_code, new_name, model, scalers)
             trained = load_trained_stocks()
             if new_code not in trained:
                 trained[new_code] = new_name
                 save_trained_stocks(trained)
-                # featured_data 업데이트
                 featured_data[new_code] = add_features(df_raw)
                 st.info(f'✅ {new_name} 을 학습 풀에 추가했습니다. 다음 재학습 시 반영됩니다.')
         except Exception as e:
@@ -529,15 +574,6 @@ def _run_analysis(new_code, new_name, model, scalers, featured_data):
 # ============================================================
 st.title('📈 LEADER DL Filter')
 st.caption('KOSPI 캔들차트 딥러닝 매수 타이밍 필터 | LSTM 기반')
-
-with st.sidebar:
-    st.header('⚙️ 설정')
-    st.info('최초 실행 시 학습이 진행됩니다. (약 3~5분)')
-    if st.button('🔄 모델 재학습', type='secondary'):
-        for f in [MODEL_PATH, SCALER_PATH]:
-            if os.path.exists(f): os.remove(f)
-        st.cache_resource.clear()
-        st.rerun()
 
 with st.spinner('모델 준비 중...'):
     model, scalers, featured_data, raw_data = load_model_and_data()
@@ -617,11 +653,9 @@ with tab3:
         st.session_state.portfolio = load_portfolio()
     portfolio = st.session_state.portfolio
 
-    # ── 종목 추가/수정 (컴팩트) ──
     with st.expander('➕ 종목 추가 / 수정', expanded=len(portfolio)==0):
         trained_stocks = load_trained_stocks()
         all_stock_opts = {f'{name} ({code})': code for code,name in trained_stocks.items()}
-
         c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
         with c1:
             add_label = st.selectbox('종목', options=list(all_stock_opts.keys()), key='add_stock', label_visibility='collapsed')
@@ -634,11 +668,9 @@ with tab3:
         with c4:
             st.write('')
             save_btn = st.button('💾', key='save_stock', type='primary', use_container_width=True)
-
         st.caption(f'종목  |  총매입금액(원)  |  수량(주)  |  저장')
         if add_total > 0 and add_qty > 0:
             st.caption(f'→ 주당 평균단가: {int(add_total/add_qty):,}원')
-
         if save_btn:
             if add_total > 0 and add_qty > 0:
                 avg_price = add_total / add_qty
@@ -654,7 +686,6 @@ with tab3:
             else:
                 st.error('금액과 수량을 입력하세요.')
 
-    # ── 삭제 ──
     portfolio = load_portfolio()
     if portfolio:
         del_options = ['선택 안 함'] + [f"{v['name']} ({k})" for k,v in portfolio.items()]
@@ -671,7 +702,6 @@ with tab3:
 
     st.divider()
 
-    # ── 보유 종목 현황 ──
     portfolio = load_portfolio()
     if not portfolio:
         st.info('보유 종목을 추가해주세요.')
@@ -681,17 +711,17 @@ with tab3:
 
         summary_rows = []
         detail_data  = {}
+        atr_mult = st.session_state.get('atr_mult', 2.0)
 
         for code, info in portfolio.items():
             name      = info['name']
             buy_price = info['price']
             qty       = info['qty']
             total_buy = info.get('total', buy_price * qty)
-
             try:
                 df_raw    = get_raw_data(code)
                 df_feat   = add_features(df_raw)
-                close_now, atr14, stop_atr, stop_10low, stop_20low, unit = calc_turtle(df_raw)
+                close_now, atr14, stop_atr, stop_10low, stop_20low, unit = calc_turtle(df_raw, atr_mult)
                 _, probs, signals = get_predictions(df_feat, code, model, scalers)
                 latest_prob   = probs[-1]
                 latest_signal = '🟢 매수' if latest_prob >= THRESHOLD_PRED else '🔴 비신호'
@@ -710,7 +740,7 @@ with tab3:
                     '수량': f'{qty}주', '총매입': f'{int(total_buy):,}원',
                     '현재가': f'{int(close_now):,}원', '평가금액': f'{eval_amt:,}원',
                     '손익': f'{pnl:+,}원', '수익률': f'{pnl_pct:+.1f}%',
-                    'ATR손절': f'{int(stop_atr):,}원',
+                    f'ATR×{atr_mult:.1f}손절': f'{int(stop_atr):,}원',
                     '10일손절': f'{int(stop_10low):,}원',
                     'DL신호': f'{latest_signal}({latest_prob:.0%})',
                     '상태': stop_hit,
@@ -725,14 +755,11 @@ with tab3:
                     'DL신호': '-', '상태': f'❌{e}',
                 })
 
-        # 요약 테이블
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
 
-        # 총계
         try:
             total_buy_sum  = sum(info.get('total', info['price']*info['qty']) for info in portfolio.values())
-            total_eval_sum = sum(detail_data[c]['close_now'] * portfolio[c]['qty']
-                                 for c in detail_data)
+            total_eval_sum = sum(detail_data[c]['close_now'] * portfolio[c]['qty'] for c in detail_data)
             total_pnl = total_eval_sum - total_buy_sum
             total_pct = total_pnl / total_buy_sum * 100 if total_buy_sum > 0 else 0
             m1,m2,m3,m4 = st.columns(4)
@@ -745,36 +772,36 @@ with tab3:
             pass
 
         st.divider()
-
-        # 종목별 상세 (손절선 + 차트)
         st.subheader('📊 종목별 상세')
         for code, info in portfolio.items():
             if code not in detail_data:
                 continue
             d = detail_data[code]
             name = info['name']
-
             with st.expander(f"{name} ({code})  |  {d['latest_signal']}  |  현재가 {int(d['close_now']):,}원  |  상태 {'⚠️손절' if d['close_now']<=d['stop_atr'] else '✅정상'}"):
                 mc1, mc2, mc3 = st.columns(3)
                 mc1.metric('현재가', f"{int(d['close_now']):,}원")
                 mc1.metric('DL 확률', f"{d['latest_prob']:.1%}")
-                mc2.metric('ATR 손절가', f"{int(d['stop_atr']):,}원",
+                mc2.metric(f'ATR×{atr_mult:.1f} 손절가', f"{int(d['stop_atr']):,}원",
                            f"-{(d['close_now']-d['stop_atr'])/d['close_now']*100:.1f}%", delta_color='inverse')
                 mc2.metric('10일 손절가', f"{int(d['stop_10low']):,}원",
                            f"-{(d['close_now']-d['stop_10low'])/d['close_now']*100:.1f}%", delta_color='inverse')
                 mc3.metric('20일 손절가', f"{int(d['stop_20low']):,}원",
                            f"-{(d['close_now']-d['stop_20low'])/d['close_now']*100:.1f}%", delta_color='inverse')
                 mc3.metric('ATR(14)', f"{int(d['atr14']):,}원")
-
                 if st.button(f'📈 차트 보기', key=f'chart_{code}'):
                     from datetime import date, timedelta
                     max_d = d['df_feat'].index.max().date()
                     draw_chart(d['df_feat'], code, name,
                                pd.Timestamp(max_d - timedelta(days=90)),
                                pd.Timestamp(max_d), model, scalers)
-    # ── 탭4: 백테스트 ──
+
+# ── 탭4: 백테스트 ──
 with tab4:
     st.subheader('🧪 백테스트 — 매수 후 손절까지 수익률 시뮬레이션')
+
+    atr_mult  = st.session_state.get('atr_mult', 2.0)
+    gap_slip  = st.session_state.get('gap_slip', True)
 
     trained_stocks = load_trained_stocks()
     c1, c2, c3 = st.columns(3)
@@ -788,12 +815,15 @@ with tab4:
         bt_start = st.date_input('매수일', value=date(2025,1,2), key='bt_start')
     with c3:
         bt_stop_type = st.selectbox('손절 기준',
-            ['ATR 2배 손절', '10일 최저가', '20일 최저가', '기간 만료(보유일 지정)'],
+            [f'ATR×{atr_mult:.1f} 손절', '10일 최저가', '20일 최저가', '기간 만료(보유일 지정)'],
             key='bt_stop')
 
     hold_days = None
-    if bt_stop_type == '기간 만료(보유일 지정)':
+    if '기간 만료' in bt_stop_type:
         hold_days = st.slider('보유 기간 (거래일)', 1, 60, 20)
+
+    # 현재 사이드바 설정 표시
+    st.info(f'📌 현재 설정 — 임계값: **{THRESHOLD_PRED*100:.0f}%** | ATR 배수: **{atr_mult:.1f}배** | 갭다운 체결 반영: **{"ON" if gap_slip else "OFF"}**')
 
     if st.button('🧪 백테스트 실행', type='primary'):
         df = featured_data.get(bt_code)
@@ -804,7 +834,6 @@ with tab4:
             df_raw.index = pd.to_datetime(df_raw.index)
             bt_start_ts = pd.Timestamp(bt_start)
 
-            # 매수일 찾기
             avail = df_raw.index[df_raw.index >= bt_start_ts]
             if len(avail) == 0:
                 st.error('해당 날짜 이후 데이터 없음')
@@ -813,39 +842,62 @@ with tab4:
                 entry_price = df_raw.loc[entry_dt, 'close']
                 entry_idx   = df_raw.index.get_loc(entry_dt)
 
-                # 손절가 계산 (매수일 기준 과거 데이터만)
+                # ── 손절가 계산 (매수일 기준 과거 데이터만 사용) ──
                 df_before = df_raw.iloc[:entry_idx+1]
                 tr = pd.concat([
                     df_before['high'] - df_before['low'],
                     (df_before['high'] - df_before['close'].shift()).abs(),
                     (df_before['low']  - df_before['close'].shift()).abs()
                 ], axis=1).max(axis=1)
-                atr14 = tr.rolling(14).mean().iloc[-1]
+                atr14_entry = tr.rolling(14).mean().iloc[-1]
 
-                if bt_stop_type == 'ATR 2배 손절':
-                    stop_price = entry_price - 2 * atr14
-                elif bt_stop_type == '10일 최저가':
+                if 'ATR' in bt_stop_type:
+                    stop_price = entry_price - atr_mult * atr14_entry
+                    stop_label = f'매수가({int(entry_price):,}) - {atr_mult:.1f}×ATR({int(atr14_entry):,})'
+                elif '10일' in bt_stop_type:
                     stop_price = df_before['low'].tail(10).min()
-                elif bt_stop_type == '20일 최저가':
+                    stop_label = '매수일 기준 과거 10일 최저가'
+                elif '20일' in bt_stop_type:
                     stop_price = df_before['low'].tail(20).min()
+                    stop_label = '매수일 기준 과거 20일 최저가'
                 else:
                     stop_price = None
+                    stop_label = f'{hold_days}거래일 보유 후 청산'
 
-                # 청산 시점 탐색
+                # ── 청산 시점 탐색 (개선된 손절 로직) ──
                 df_after = df_raw.iloc[entry_idx+1:]
                 exit_dt, exit_price, exit_reason = None, None, None
+                slippage_note = ''
 
                 if hold_days:
-                    if len(df_after) >= hold_days:
-                        exit_dt     = df_after.index[hold_days-1]
-                        exit_price  = df_after['close'].iloc[hold_days-1]
-                        exit_reason = f'{hold_days}거래일 후 청산'
-                    else:
+                    # 기간 만료 — 단, 손절 먼저 확인
+                    for dt, row in df_after.iterrows():
+                        # 갭다운 손절 체크 (시가가 손절가 아래로 시작)
+                        if stop_price and row['open'] <= stop_price:
+                            exit_dt     = dt
+                            exit_price  = row['open']   # 시가 체결
+                            exit_reason = f'갭다운 시가 손절'
+                            slippage_note = f'⚠️ 갭다운: 손절가 {int(stop_price):,}원보다 낮은 시가 {int(row["open"]):,}원에 체결'
+                            break
+                        if df_after.index.get_loc(dt) >= hold_days - 1:
+                            exit_dt     = dt
+                            exit_price  = row['close']
+                            exit_reason = f'{hold_days}거래일 후 청산'
+                            break
+                    if exit_dt is None:
                         exit_dt     = df_after.index[-1]
                         exit_price  = df_after['close'].iloc[-1]
                         exit_reason = '데이터 끝'
                 else:
                     for dt, row in df_after.iterrows():
+                        # ① 갭다운: 시가가 손절가 아래로 시작 → 시가 체결 (실전 반영)
+                        if gap_slip and row['open'] <= stop_price:
+                            exit_dt     = dt
+                            exit_price  = row['open']
+                            exit_reason = f'갭다운 시가 손절'
+                            slippage_note = f'⚠️ 갭다운: 손절가 {int(stop_price):,}원 아래 시가({int(row["open"]):,}원) 체결'
+                            break
+                        # ② 일중 저가가 손절가 터치 → 손절가 체결
                         if row['low'] <= stop_price:
                             exit_dt     = dt
                             exit_price  = stop_price
@@ -856,18 +908,14 @@ with tab4:
                         exit_price  = df_after['close'].iloc[-1]
                         exit_reason = '손절 미도달 (현재까지 보유)'
 
-                ret = (exit_price - entry_price) / entry_price * 100
+                ret  = (exit_price - entry_price) / entry_price * 100
                 hold = len(df_raw.loc[entry_dt:exit_dt]) - 1
 
-                # 딥러닝 신호 확인 (매수일)
+                # 딥러닝 신호 확인
                 dates_arr, probs, signals = get_predictions(df, bt_code, model, scalers)
-                prob_on_entry = 0.0
-                for dt, p in zip(dates_arr, probs):
-                    if dt == entry_dt:
-                        prob_on_entry = p
-                        break
+                prob_on_entry = next((p for dt, p in zip(dates_arr, probs) if dt == entry_dt), 0.0)
 
-                # 결과
+                # ── 결과 표시 ──
                 st.divider()
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric('매수일', entry_dt.strftime('%Y.%m.%d'))
@@ -880,10 +928,18 @@ with tab4:
                 col4.metric('청산 이유', exit_reason)
                 col4.metric('딥러닝 확률 (매수일)', f'{prob_on_entry:.1%}',
                             '신호 있음' if prob_on_entry>=THRESHOLD_PRED else '신호 없음')
-                if stop_price:
-                    col4.metric('손절가', f'{int(stop_price):,}원')
 
-                # 차트
+                if stop_price:
+                    loss_pct = (stop_price - entry_price) / entry_price * 100
+                    st.caption(f'📌 손절 기준: {stop_label}')
+                    st.caption(f'📌 이론 손절가: {int(stop_price):,}원  ({loss_pct:.1f}%)')
+                    if slippage_note:
+                        st.warning(slippage_note)
+                    actual_loss_pct = (exit_price - entry_price) / entry_price * 100
+                    if actual_loss_pct < loss_pct:
+                        st.error(f'🔻 갭다운 슬리피지 손실: {actual_loss_pct - loss_pct:.1f}%p 추가 손실')
+
+                # ── 백테스트 차트 ──
                 chart_start = pd.Timestamp(bt_start) - pd.Timedelta(days=10)
                 chart_end   = exit_dt + pd.Timedelta(days=5) if exit_dt else pd.Timestamp(date.today())
                 df_chart = df_raw.loc[(df_raw.index >= chart_start) & (df_raw.index <= chart_end)].copy()
@@ -899,20 +955,22 @@ with tab4:
                            bottom=min(row['open'],row['close']),color=c,alpha=0.8,width=0.6)
                 ax.plot(xs, df_chart['close'].values, color='#333333', linewidth=1.1, alpha=0.6, label='종가')
 
-                # 매수/청산 마커
                 if entry_dt in dt_to_x:
                     ax.scatter(dt_to_x[entry_dt], entry_price*1.015,
                                marker='v', s=200, color='#27AE60', zorder=7, label=f'매수 {int(entry_price):,}원')
                 if exit_dt and exit_dt in dt_to_x:
+                    marker_c = '#E74C3C' if ret < 0 else '#27AE60'
                     ax.scatter(dt_to_x[exit_dt], exit_price*0.985,
-                               marker='^', s=200, color='#E74C3C', zorder=7, label=f'청산 {int(exit_price):,}원')
+                               marker='^', s=200, color=marker_c, zorder=7, label=f'청산 {int(exit_price):,}원')
 
-                # 손절선
                 if stop_price:
                     ax.axhline(stop_price, color='#E74C3C', linestyle='--',
-                               linewidth=1.5, label=f'손절가 {int(stop_price):,}원')
+                               linewidth=1.5, label=f'이론 손절가 {int(stop_price):,}원')
+                    # 갭다운으로 실제 체결가가 다를 때 별도 표시
+                    if gap_slip and exit_price != stop_price and '갭다운' in exit_reason:
+                        ax.axhline(exit_price, color='#E67E22', linestyle=':',
+                                   linewidth=1.5, label=f'실제 체결가 {int(exit_price):,}원')
 
-                # 보유 구간 음영
                 if entry_dt in dt_to_x and exit_dt and exit_dt in dt_to_x:
                     ax.axvspan(dt_to_x[entry_dt], dt_to_x[exit_dt],
                                alpha=0.08, color='#27AE60' if ret>=0 else '#E74C3C')
@@ -927,7 +985,6 @@ with tab4:
                 ax.set_xlim(-0.8, n-0.2)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
 
-
 # ── 탭5: 자동 성능 점검 ──
 with tab5:
     st.subheader('🤖 자동 성능 점검 & 모델 개선 시스템')
@@ -941,7 +998,6 @@ with tab5:
     if st.button('🔍 성능 점검 시작', type='primary'):
         trained_stocks = load_trained_stocks()
         all_results = []
-
         prog = st.progress(0)
         for i,(code,name) in enumerate(trained_stocks.items()):
             prog.progress((i+1)/len(trained_stocks), text=f'{name} 점검 중...')
@@ -951,7 +1007,6 @@ with tab5:
                 df = featured_data[code]
                 dates_arr, probs, signals = get_predictions(df, code, model, scalers)
                 df_raw = df.copy(); df_raw.index = pd.to_datetime(df_raw.index)
-
                 for dt, prob, sig in zip(dates_arr, probs, signals):
                     idx = df_raw.index.get_loc(dt) if dt in df_raw.index else None
                     if idx is None or idx+FUTURE_DAYS >= len(df_raw):
@@ -973,8 +1028,6 @@ with tab5:
             st.error('점검 데이터 없음')
         else:
             df_res = pd.DataFrame(all_results)
-
-            # 전체 정확도
             sig_df  = df_res[df_res['signal']]
             overall_acc = sig_df['actual_up'].mean() if len(sig_df) > 0 else 0
             total_sig   = len(sig_df)
@@ -999,7 +1052,6 @@ with tab5:
             else:
                 st.success('✅ 모델 성능이 양호합니다.')
 
-            # 확률 구간별 정확도
             st.subheader('📊 확률 구간별 실제 정확도')
             bins = [(0.5,0.6),(0.6,0.7),(0.7,0.8),(0.8,0.9),(0.9,1.0)]
             bin_rows = []
@@ -1018,7 +1070,6 @@ with tab5:
             if bin_rows:
                 st.dataframe(pd.DataFrame(bin_rows), use_container_width=True)
 
-            # 종목별 성과
             st.subheader('📋 종목별 신호 성과')
             stock_rows = []
             for code in trained_stocks:
@@ -1034,7 +1085,6 @@ with tab5:
             if stock_rows:
                 st.dataframe(pd.DataFrame(stock_rows), use_container_width=True)
 
-            # 임계값 최적화 제안
             st.subheader('⚙️ 최적 임계값 탐색')
             best_thresh, best_acc, best_ret = THRESHOLD_PRED, 0, 0
             thresh_rows = []
@@ -1048,6 +1098,7 @@ with tab5:
                     '신호 횟수': len(sub),
                     '정확도': f'{acc:.1%}',
                     '평균 수익률': f'{ret:+.1f}%',
+                    '현재 선택': '✅' if abs(thresh - THRESHOLD_PRED) < 0.01 else '',
                 })
                 if acc > best_acc:
                     best_acc, best_thresh, best_ret = acc, thresh, ret
@@ -1055,121 +1106,4 @@ with tab5:
                 st.dataframe(pd.DataFrame(thresh_rows), use_container_width=True)
                 st.success(f'🎯 최적 임계값: **{best_thresh*100:.0f}%** '
                            f'(정확도 {best_acc:.1%}, 평균수익률 {best_ret:+.1f}%)')
-                st.info(f'현재 임계값: {THRESHOLD_PRED*100:.0f}% → '
-                        f'app.py 상단의 THRESHOLD_PRED = {best_thresh} 로 변경을 권장합니다.')                
-
-    # ── 보유 종목 삭제 ──
-    if portfolio:
-        del_code = st.selectbox('삭제할 종목',
-                                options=['선택 안 함'] + [f"{v['name']} ({k})" for k,v in portfolio.items()])
-        if del_code != '선택 안 함':
-            code_to_del = del_code.split('(')[-1].replace(')','').strip()
-            if st.button('🗑️ 삭제', type='secondary'):
-                portfolio.pop(code_to_del, None)
-                save_portfolio(portfolio)
-                st.success('삭제 완료'); st.rerun()
-
-    st.divider()
-
-    # ── 보유 종목 현황 ──
-    if not portfolio:
-        st.info('보유 종목을 추가해주세요.')
-    else:
-        if st.button('🔄 현황 새로고침', type='primary', key='refresh_portfolio'):
-            st.rerun()
-
-        summary_rows = []
-        for code, info in portfolio.items():
-            name      = info['name']
-            buy_price = info['price']
-            qty       = info['qty']
-
-            try:
-                df_raw = get_raw_data(code)
-                df_feat= add_features(df_raw)
-                close_now, atr14, stop_atr, stop_10low, stop_20low, unit = calc_turtle(df_raw)
-
-                # 딥러닝 신호
-                _, probs, signals = get_predictions(df_feat, code, model, scalers)
-                latest_prob   = probs[-1]
-                latest_signal = '🟢 매수' if latest_prob >= THRESHOLD_PRED else '🔴 비신호'
-
-                # 손익 계산
-                eval_amt  = int(close_now * qty)
-                buy_amt   = int(buy_price * qty)
-                pnl       = eval_amt - buy_amt
-                pnl_pct   = (close_now - buy_price) / buy_price * 100
-
-                # 손절 도달 여부
-                stop_hit  = '⚠️ 손절' if close_now <= stop_atr else '✅ 정상'
-
-                summary_rows.append({
-                    '종목': name,
-                    '코드': code,
-                    '주당단가': f'{int(buy_price):,}원',
-                    '총매입금액': f'{int(buy_price*qty):,}원',
-                    '현재가': f'{int(close_now):,}원',
-                    '수량': f'{qty}주',
-                    '매입금액': f'{buy_amt:,}원',
-                    '평가금액': f'{eval_amt:,}원',
-                    '손익': f'{pnl:+,}원',
-                    '수익률': f'{pnl_pct:+.1f}%',
-                    'ATR손절가': f'{int(stop_atr):,}원',
-                    '10일손절가': f'{int(stop_10low):,}원',
-                    '딥러닝': f'{latest_signal} ({latest_prob:.0%})',
-                    '상태': stop_hit,
-                })
-            except Exception as e:
-                summary_rows.append({
-                    '종목': name, '코드': code,
-                    '매입가': f'{buy_price:,}원', '현재가': '조회실패',
-                    '수량': f'{qty}주', '매입금액': '-', '평가금액': '-',
-                    '손익': '-', '수익률': '-', 'ATR손절가': '-',
-                    '10일손절가': '-', '딥러닝': '-', '상태': f'❌ {e}',
-                })
-
-        df_summary = pd.DataFrame(summary_rows)
-        st.dataframe(df_summary, use_container_width=True)
-
-        # 합계
-        total_buy  = sum(info['price']*info['qty'] for info in portfolio.values())
-        try:
-            total_eval = sum(
-                int(get_raw_data(code)['close'].iloc[-1]) * info['qty']
-                for code, info in portfolio.items()
-            )
-            total_pnl = total_eval - total_buy
-            total_pct = total_pnl / total_buy * 100 if total_buy > 0 else 0
-
-            st.divider()
-            m1,m2,m3,m4 = st.columns(4)
-            m1.metric('총 매입금액', f'{int(total_buy):,}원')
-            m2.metric('총 평가금액', f'{int(total_eval):,}원')
-            m3.metric('총 손익', f'{int(total_pnl):+,}원')
-            m4.metric('총 수익률', f'{total_pct:+.1f}%',
-                      delta_color='normal' if total_pct>=0 else 'inverse')
-        except:
-            pass
-
-        # 개별 종목 상세 차트
-        st.divider()
-        st.subheader('📊 보유 종목 상세 차트')
-        sel_holding = st.selectbox('종목 선택',
-                                   options=[f"{v['name']} ({k})" for k,v in portfolio.items()],
-                                   key='holding_chart')
-        if sel_holding and st.button('📈 차트 보기', key='holding_chart_btn'):
-            hcode = sel_holding.split('(')[-1].replace(')','').strip()
-            hname = sel_holding.split('(')[0].strip()
-            if hcode in featured_data:
-                from datetime import date, timedelta
-                max_hd = max(featured_data[hcode].index).date()
-                draw_chart(featured_data[hcode], hcode, hname,
-                           pd.Timestamp(max_hd - timedelta(days=90)),
-                           pd.Timestamp(max_hd), model, scalers)
-            else:
-                df_raw = get_raw_data(hcode)
-                df_feat= add_features(df_raw)
-                max_hd = df_feat.index.max().date()
-                draw_chart(df_feat, hcode, hname,
-                           pd.Timestamp(max_hd - timedelta(days=90)),
-                           pd.Timestamp(max_hd), model, scalers)
+                st.info(f'💡 사이드바 슬라이더에서 임계값을 **{best_thresh*100:.0f}%** 로 조정해보세요.')
