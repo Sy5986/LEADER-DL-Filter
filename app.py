@@ -10,7 +10,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.ticker
-import warnings, pickle, os, json
+import warnings, pickle, os, json, time
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title='LEADER DL Filter', page_icon='📈', layout='wide')
@@ -31,20 +31,21 @@ def set_korean_font():
 set_korean_font()
 
 # ============================================================
-# 설정 (상수)
+# 설정
 # ============================================================
-SUPABASE_URL    = 'https://qdyzkekzjrzaupeplyxv.supabase.co'
+SUPABASE_URL = 'https://qdyzkekzjrzaupeplyxv.supabase.co'
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY', 'sb_secret_u1wuZY958fWHkqTX1qDGfw_tCQQYy7A')
-USE_SUPABASE    = True
-LOOKBACK        = 20
-FUTURE_DAYS     = 5
-RISE_THRESHOLD  = 0.03
-TRAIN_YEARS     = 5
-TEST_RATIO      = 0.2
-MODEL_PATH      = 'leader_dl_model.keras'
-SCALER_PATH     = 'leader_scalers.pkl'
-PORTFOLIO_PATH  = 'portfolio.json'
-TRAINED_PATH    = 'trained_stocks.json'
+USE_SUPABASE = True
+LOOKBACK       = 20
+FUTURE_DAYS    = 5
+RISE_THRESHOLD = 0.03
+TRAIN_YEARS    = 5
+TEST_RATIO     = 0.2
+MODEL_PATH     = 'leader_dl_model.keras'
+SCALER_PATH    = 'leader_scalers.pkl'
+PORTFOLIO_PATH = 'portfolio.json'
+TRAINED_PATH   = 'trained_stocks.json'
+KOSPI_PATH     = 'kospi_stocks.json'   # 코스피 전체 종목 캐시
 
 FEATURE_COLS = [
     'body','upper_wick','lower_wick','candle_range',
@@ -55,60 +56,89 @@ FEATURE_COLS = [
     'macd','macd_signal','macd_hist'
 ]
 
-DEFAULT_STOCKS = {
-    '005930': '삼성전자',
-    '000660': 'SK하이닉스',
-    '001440': '대한전선',
-    '032500': '케이엠더블유',
-    '082740': '한화엔진',
-    '006340': '대원전선',
-}
-
 # ============================================================
-# 사이드바 — 임계값 슬라이더 (전역 session_state로 관리)
+# 사이드바
 # ============================================================
 with st.sidebar:
     st.header('⚙️ 설정')
-    st.info('최초 실행 시 학습이 진행됩니다. (약 3~5분)')
 
     THRESHOLD_PRED = st.slider(
         '📊 매수 신호 임계값',
         min_value=0.50, max_value=0.95,
         value=st.session_state.get('threshold', 0.70),
-        step=0.05,
-        format='%.2f',
+        step=0.05, format='%.2f',
         help='높을수록 신호 횟수는 줄지만 정확도가 올라갑니다'
     )
     st.session_state['threshold'] = THRESHOLD_PRED
     st.caption(f'현재 임계값: **{THRESHOLD_PRED*100:.0f}%**')
 
     st.divider()
-
-    # ── 백테스트 손절 파라미터 ──
     st.subheader('🧪 백테스트 파라미터')
     BT_ATR_MULT = st.slider(
-        'ATR 손절 배수',
-        min_value=1.0, max_value=4.0,
-        value=st.session_state.get('atr_mult', 2.0),
-        step=0.5,
-        help='ATR × 배수 = 손절가. 기본값 2.0 (터틀 트레이딩 기준)'
+        'ATR 손절 배수', min_value=1.0, max_value=4.0,
+        value=st.session_state.get('atr_mult', 2.0), step=0.5,
+        help='ATR × 배수 = 손절가'
     )
     st.session_state['atr_mult'] = BT_ATR_MULT
 
     BT_GAP_SLIP = st.checkbox(
         '갭다운 시가 체결 반영',
         value=st.session_state.get('gap_slip', True),
-        help='손절 당일 시가가 손절가보다 낮으면 시가로 체결 (실전 반영)'
+        help='손절 당일 시가가 손절가보다 낮으면 시가로 체결'
     )
     st.session_state['gap_slip'] = BT_GAP_SLIP
 
     st.divider()
-
     if st.button('🔄 모델 재학습', type='secondary', use_container_width=True):
-        for f in [MODEL_PATH, SCALER_PATH]:
+        for f in [MODEL_PATH, SCALER_PATH, TRAINED_PATH]:
             if os.path.exists(f): os.remove(f)
         st.cache_resource.clear()
+        st.cache_data.clear()
         st.rerun()
+
+# ============================================================
+# Supabase
+# ============================================================
+@st.cache_resource
+def get_supabase():
+    from supabase import create_client
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# ============================================================
+# 코스피 전체 종목 리스트
+# ============================================================
+@st.cache_data(ttl=60*60*24)
+def get_kospi_all_stocks():
+    """kospi_stocks.json 파일에서 코스피 전체 종목 로드"""
+    if os.path.exists(KOSPI_PATH):
+        with open(KOSPI_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    # 파일 없으면 pykrx 시도
+    try:
+        from pykrx import stock
+        from datetime import datetime, timedelta
+        for delta in range(5):
+            try_date = (datetime.today() - timedelta(days=delta)).strftime('%Y%m%d')
+            tickers = stock.get_market_ticker_list(try_date, market='KOSPI')
+            if tickers:
+                result = {code: stock.get_market_ticker_name(code) for code in tickers}
+                with open(KOSPI_PATH, 'w', encoding='utf-8') as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+                return result
+    except:
+        pass
+    st.warning('kospi_stocks.json 파일이 없습니다.')
+    return {}
+
+def search_stock(query):
+    """종목명 또는 종목코드로 검색"""
+    all_stocks = get_kospi_all_stocks()
+    query = query.strip()
+    result = {}
+    for code, name in all_stocks.items():
+        if query in name or query == code:
+            result[code] = name
+    return result  # {code: name}
 
 # ============================================================
 # 포트폴리오 관리
@@ -143,10 +173,8 @@ def save_portfolio(portfolio):
             sb.table('portfolio').delete().neq('code','').execute()
             for code, info in portfolio.items():
                 sb.table('portfolio').upsert({
-                    'code' : code,
-                    'name' : info['name'],
-                    'price': info['price'],
-                    'qty'  : info['qty'],
+                    'code' : code, 'name' : info['name'],
+                    'price': info['price'], 'qty'  : info['qty'],
                     'total': info.get('total', info['price']*info['qty']),
                 }).execute()
         except Exception as e:
@@ -164,7 +192,7 @@ def load_trained_stocks():
     if os.path.exists(TRAINED_PATH):
         with open(TRAINED_PATH, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return DEFAULT_STOCKS
+    return get_kospi_all_stocks()
 
 def save_trained_stocks(stocks):
     with open(TRAINED_PATH, 'w', encoding='utf-8') as f:
@@ -172,11 +200,11 @@ def save_trained_stocks(stocks):
     if USE_SUPABASE:
         try:
             sb = get_supabase()
+            # 배치 upsert (한 번에 100개씩)
+            items = [{'code': c, 'name': n} for c,n in stocks.items()]
             sb.table('trained_stocks').delete().neq('code','').execute()
-            for code, name in stocks.items():
-                sb.table('trained_stocks').upsert({
-                    'code': code, 'name': name
-                }).execute()
+            for i in range(0, len(items), 100):
+                sb.table('trained_stocks').upsert(items[i:i+100]).execute()
         except Exception as e:
             st.warning(f'Supabase 저장 실패: {e}')
 
@@ -242,9 +270,17 @@ def get_raw_data(code):
     df = stock.get_market_ohlcv_by_date(start, end, code)
     df = df.iloc[:,:5]
     df.columns = ['open','high','low','close','volume']
-    return df[df['volume'] > 0]
+    df = df[df['volume'] > 0]
+    if len(df) == 0:
+        raise ValueError(f'{code} 데이터 없음')
+    return df
 
-def train_on_stocks(stocks_dict):
+def train_on_stocks(stocks_dict, progress_bar=None, status_text=None):
+    """
+    코스피 전체 종목 학습.
+    - 에러 종목은 건너뜀
+    - 진행률 표시
+    """
     from sklearn.preprocessing import StandardScaler
     import tensorflow as tf
     from tensorflow.keras.models import Sequential
@@ -253,14 +289,20 @@ def train_on_stocks(stocks_dict):
 
     all_X, all_y = [], []
     scalers, featured_data, raw_data = {}, {}, {}
+    total = len(stocks_dict)
+    success, fail = 0, 0
 
-    for code, name in stocks_dict.items():
+    for i, (code, name) in enumerate(stocks_dict.items()):
+        if progress_bar:
+            progress_bar.progress((i+1)/total, text=f'데이터 수집 중... {i+1}/{total} — {name}({code})')
         try:
             df = get_raw_data(code)
             raw_data[code] = df
             df_feat = add_features(df)
             featured_data[code] = df_feat
             d = df_feat[FEATURE_COLS].dropna()
+            if len(d) < 100:   # 데이터 너무 적으면 건너뜀
+                continue
             n_train = int(len(d) * (1 - TEST_RATIO))
             scaler  = StandardScaler()
             d_sc    = d.copy()
@@ -270,12 +312,18 @@ def train_on_stocks(stocks_dict):
             df_s = df_feat.copy()
             df_s[FEATURE_COLS] = d_sc
             X, y, _ = make_sequences(df_s, LOOKBACK, FUTURE_DAYS, RISE_THRESHOLD)
+            if len(X) == 0:
+                continue
             all_X.append(X); all_y.append(y)
+            success += 1
         except Exception as e:
-            st.warning(f'{name} 수집 실패: {e}')
+            fail += 1
+
+    if status_text:
+        status_text.info(f'✅ 수집 완료: {success}개 성공 / {fail}개 실패 — 모델 학습 시작...')
 
     if not all_X:
-        raise ValueError('데이터 수집 실패')
+        raise ValueError('데이터 수집 실패 — 네트워크(KRX 접근)를 확인하세요')
 
     all_X = np.concatenate(all_X, axis=0)
     all_y = np.concatenate(all_y, axis=0)
@@ -297,7 +345,7 @@ def train_on_stocks(stocks_dict):
     )
     model.fit(
         X_tr, y_tr,
-        validation_split=0.15, epochs=100, batch_size=64,
+        validation_split=0.15, epochs=100, batch_size=128,
         class_weight={0:1.0, 1:pw},
         callbacks=[
             EarlyStopping(monitor='val_auc', patience=10, restore_best_weights=True, mode='max'),
@@ -306,46 +354,64 @@ def train_on_stocks(stocks_dict):
     )
     return model, scalers, featured_data, raw_data
 
-@st.cache_resource(show_spinner='📥 데이터 수집 및 모델 학습 중... (최초 1회, 약 3~5분)')
+@st.cache_resource(show_spinner=False)
 def load_model_and_data():
-    trained_stocks = load_trained_stocks()
+    # 모델 파일 없으면 코스피 전체로 학습
+    if not os.path.exists(MODEL_PATH):
+        trained_stocks = get_kospi_all_stocks()
+    else:
+        trained_stocks = load_trained_stocks()
+
     if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
         import tensorflow as tf
         model = tf.keras.models.load_model(MODEL_PATH)
         with open(SCALER_PATH, 'rb') as f:
             scalers = pickle.load(f)
         featured_data, raw_data = {}, {}
-        for code in trained_stocks:
+        for code, name in trained_stocks.items():
             try:
                 df = get_raw_data(code)
                 raw_data[code] = df
                 featured_data[code] = add_features(df)
+                if code not in scalers:
+                    from sklearn.preprocessing import StandardScaler
+                    d = featured_data[code][FEATURE_COLS].dropna()
+                    sc = StandardScaler()
+                    sc.fit(d.iloc[:int(len(d)*0.8)])
+                    scalers[code] = sc
             except:
                 pass
     else:
-        model, scalers, featured_data, raw_data = train_on_stocks(trained_stocks)
+        # 최초 학습 — 코스피 전체
+        kospi_all = get_kospi_all_stocks()
+        pb  = st.progress(0, text='코스피 종목 데이터 수집 중...')
+        txt = st.empty()
+        model, scalers, featured_data, raw_data = train_on_stocks(kospi_all, pb, txt)
+        pb.empty(); txt.empty()
         model.save(MODEL_PATH)
         with open(SCALER_PATH, 'wb') as f:
             pickle.dump(scalers, f)
+        # trained_stocks 업데이트 (성공한 종목만)
+        save_trained_stocks({c: kospi_all[c] for c in featured_data if c in kospi_all})
+
     return model, scalers, featured_data, raw_data
 
 def get_predictions(df, code, model, scalers):
     from sklearn.preprocessing import StandardScaler
     d = df[FEATURE_COLS].dropna()
     if code in scalers:
-        scaler  = scalers[code]
-        d_sc    = pd.DataFrame(scaler.transform(d), columns=FEATURE_COLS, index=d.index)
+        scaler = scalers[code]
+        d_sc   = pd.DataFrame(scaler.transform(d), columns=FEATURE_COLS, index=d.index)
     else:
-        scaler  = StandardScaler()
-        d_sc    = pd.DataFrame(scaler.fit_transform(d), columns=FEATURE_COLS, index=d.index)
+        scaler = StandardScaler()
+        d_sc   = pd.DataFrame(scaler.fit_transform(d), columns=FEATURE_COLS, index=d.index)
         scalers[code] = scaler
     df_s = df.copy(); df_s[FEATURE_COLS] = d_sc
     X, _, dates = make_sequences(df_s, LOOKBACK, FUTURE_DAYS, RISE_THRESHOLD)
-    probs   = model.predict(X, verbose=0).flatten()
+    probs = model.predict(X, verbose=0, batch_size=32).flatten()
     return pd.DatetimeIndex(dates), probs, probs >= THRESHOLD_PRED
 
 def calc_turtle(df_raw, atr_mult=2.0):
-    """터틀 트레이딩 손절 계산. atr_mult: ATR 손절 배수"""
     tr = pd.concat([
         df_raw['high'] - df_raw['low'],
         (df_raw['high'] - df_raw['close'].shift()).abs(),
@@ -395,7 +461,6 @@ def draw_chart(df, code, name, start_dt, end_dt, model, scalers):
     fig, (ax1, ax2) = plt.subplots(2,1,figsize=(14,8), gridspec_kw={'height_ratios':[3,1.5]})
     plt.subplots_adjust(hspace=0.08)
     fig.suptitle(f'{name} ({code})  |  {start_dt.strftime("%Y.%m.%d")} ~ {end_dt.strftime("%Y.%m.%d")}', fontsize=14, fontweight='bold')
-
     for i,(dt,row) in enumerate(df_range.iterrows()):
         c = '#E74C3C' if row['close']>=row['open'] else '#3498DB'
         ax1.plot([i,i],[row['low'],row['high']],color=c,linewidth=0.8,alpha=0.8)
@@ -415,7 +480,6 @@ def draw_chart(df, code, name, start_dt, end_dt, model, scalers):
     tick_step = max(1,n//12)
     ax1.set_xticks(xs[::tick_step]); ax1.set_xticklabels(dt_labels[::tick_step],rotation=30,fontsize=9)
     ax1.set_xlim(-0.8,n-0.2)
-
     vc = ['#E74C3C' if c>=o else '#3498DB' for c,o in zip(df_range['close'],df_range['open'])]
     ax2.bar(xs,df_range['volume'].values,color=vc,width=bar_w,alpha=0.5,label='거래량')
     ax2.set_ylabel('거래량',fontsize=10,color='#555555')
@@ -435,7 +499,6 @@ def draw_chart(df, code, name, start_dt, end_dt, model, scalers):
     ax2.set_xticks(xs[::tick_step]); ax2.set_xticklabels(dt_labels[::tick_step],rotation=30,fontsize=9)
     ax2.set_xlim(-0.8,n-0.2)
     plt.tight_layout(); st.pyplot(fig); plt.close()
-
     if buy_xs:
         rows = []
         for dt in buy_dates:
@@ -502,7 +565,6 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
     ax1.grid(axis='y',alpha=0.2)
     ax1.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x,_: f'{int(x):,}'))
     ax1.set_xticks(xs); ax1.set_xticklabels(dt_labels,rotation=30,fontsize=8.5); ax1.set_xlim(-0.8,n-0.2)
-
     vc=['#E74C3C' if c>=o else '#3498DB' for c,o in zip(df_20['close'],df_20['open'])]
     ax2.bar(xs,df_20['volume'].values,color=vc,width=bar_w,alpha=0.5,label='거래량')
     ax2.set_ylabel('거래량',fontsize=10,color='#555555')
@@ -542,30 +604,13 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
 
     return close_now, atr14, stop_atr, stop_10low, stop_20low, latest_prob, latest_signal
 
-# ============================================================
-# 종목명 검색
-# ============================================================
-@st.cache_data
-def search_stock_code(name_query):
-    try:
-        df = pd.read_csv('stock_list.csv', dtype={'종목코드': str})
-        mask = df['종목명'].str.contains(name_query, case=False, na=False)
-        return dict(zip(df[mask]['종목명'], df[mask]['종목코드']))
-    except:
-        return {}
-
 def _run_analysis(new_code, new_name, model, scalers, featured_data):
     with st.spinner(f'{new_name} 데이터 수집 중...'):
         try:
             df_raw = get_raw_data(new_code)
             st.success(f'✅ {len(df_raw)}일치 수집 완료')
             draw_turtle_chart(df_raw, new_code, new_name, model, scalers)
-            trained = load_trained_stocks()
-            if new_code not in trained:
-                trained[new_code] = new_name
-                save_trained_stocks(trained)
-                featured_data[new_code] = add_features(df_raw)
-                st.info(f'✅ {new_name} 을 학습 풀에 추가했습니다. 다음 재학습 시 반영됩니다.')
+            featured_data[new_code] = add_features(df_raw)
         except Exception as e:
             st.error(f'수집 실패: {e}')
 
@@ -575,30 +620,56 @@ def _run_analysis(new_code, new_name, model, scalers, featured_data):
 st.title('📈 LEADER DL Filter')
 st.caption('KOSPI 캔들차트 딥러닝 매수 타이밍 필터 | LSTM 기반')
 
+# 모델 로드 (최초 실행 시 코스피 전체 학습)
+if not (os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH)):
+    st.warning('⏳ 최초 실행입니다. 코스피 전체 종목 데이터 수집 및 학습을 시작합니다. (약 3~5시간 소요)')
+
 with st.spinner('모델 준비 중...'):
     model, scalers, featured_data, raw_data = load_model_and_data()
-st.success(f'✅ 모델 준비 완료 | {len(featured_data)}개 종목 학습됨')
+st.success(f'✅ 모델 준비 완료 | {len(featured_data)}개 종목 로드됨')
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    '📊 기간별 차트', '🔍 새 종목 분석', '💼 내 보유 주식',
+    '📊 기간별 차트', '🔍 종목 분석', '💼 내 보유 주식',
     '🧪 백테스트', '🤖 자동 성능 점검'
 ])
 
 # ── 탭1: 기간별 차트 ──
 with tab1:
-    trained_stocks = load_trained_stocks()
-    c1,c2,c3 = st.columns([2,2,2])
+    all_stocks = get_kospi_all_stocks()
+    c1,c2,c3 = st.columns([3,2,2])
     with c1:
-        sel_options = {f'{name} ({code})': code for code,name in trained_stocks.items() if code in featured_data}
-        sel_label   = st.selectbox('종목 선택', options=list(sel_options.keys()))
-        selected    = sel_options[sel_label]
+        # 종목 검색
+        search_q = st.text_input('종목 검색 (이름 또는 코드)', placeholder='예: 삼성전자 또는 005930', key='tab1_search')
+        if search_q:
+            found = search_stock(search_q)
+            if found:
+                opt_labels = [f'{n} ({c})' for c,n in found.items()]
+                sel_label  = st.selectbox('종목 선택', options=opt_labels, key='tab1_sel')
+                selected   = list(found.keys())[opt_labels.index(sel_label)]
+                sel_name   = found[selected]
+            else:
+                st.warning('검색 결과 없음')
+                st.stop()
+        else:
+            # 학습된 종목 중 선택
+            opts = {f'{n} ({c})': c for c,n in all_stocks.items() if c in featured_data}
+            if not opts:
+                st.warning('학습된 종목이 없습니다. 사이드바에서 🔄 모델 재학습을 눌러주세요.')
+                st.stop()
+            sel_label = st.selectbox('종목 선택', options=list(opts.keys()), key='tab1_sel_all')
+            selected  = opts[sel_label]
+            sel_name  = all_stocks.get(selected, selected)
     with c2:
         from datetime import date, timedelta
-        all_dates = []
-        for df in featured_data.values():
-            all_dates.extend(df.index.tolist())
-        min_d = min(all_dates).date()
-        max_d = max(all_dates).date()
+        if featured_data:
+            all_dates = []
+            for df in list(featured_data.values())[:10]:  # 일부만 확인
+                all_dates.extend(df.index.tolist())
+            max_d = max(all_dates).date()
+            min_d = min(all_dates).date()
+        else:
+            max_d = date.today()
+            min_d = date(2020,1,1)
         start_d = st.date_input('시작일', value=max_d-timedelta(days=90), min_value=min_d, max_value=max_d)
     with c3:
         end_d = st.date_input('종료일', value=max_d, min_value=min_d, max_value=max_d)
@@ -609,70 +680,77 @@ with tab1:
             start_d = max_d - timedelta(days=days) if days<9999 else min_d
 
     if st.button('📊 차트 보기', type='primary'):
+        # 학습된 종목이면 바로, 아니면 데이터 수집
         if selected in featured_data:
-            name = trained_stocks.get(selected, selected)
-            draw_chart(featured_data[selected], selected, name,
+            draw_chart(featured_data[selected], selected, sel_name,
                        pd.Timestamp(start_d), pd.Timestamp(end_d), model, scalers)
+        else:
+            with st.spinner(f'{sel_name} 데이터 수집 중...'):
+                try:
+                    df_raw = get_raw_data(selected)
+                    featured_data[selected] = add_features(df_raw)
+                    draw_chart(featured_data[selected], selected, sel_name,
+                               pd.Timestamp(start_d), pd.Timestamp(end_d), model, scalers)
+                except Exception as e:
+                    st.error(f'데이터 수집 실패: {e}')
 
-# ── 탭2: 새 종목 분석 ──
+# ── 탭2: 종목 분석 ──
 with tab2:
-    st.subheader('🔍 새 종목 분석 → 20일 차트 + 터틀 손절선 + 학습 풀 추가')
+    st.subheader('🔍 종목 분석 → 20일 차트 + 터틀 손절선')
     c1,c2 = st.columns([3,1])
     with c1:
-        name_query = st.text_input('종목명 검색', placeholder='예: 셀트리온')
+        name_query = st.text_input('종목명 또는 종목코드', placeholder='예: 셀트리온 또는 068270')
     with c2:
         st.write(''); search_btn = st.button('🔍 검색 & 분석', type='primary')
 
     if search_btn and name_query:
-        results = search_stock_code(name_query)
+        results = search_stock(name_query)  # {code: name}
         if not results:
             st.warning('검색 결과 없음')
         elif len(results) == 1:
-            new_name = list(results.keys())[0]
-            new_code = list(results.values())[0]
+            new_code = list(results.keys())[0]
+            new_name = list(results.values())[0]
             st.info(f'✅ {new_name} ({new_code})')
             _run_analysis(new_code, new_name, model, scalers, featured_data)
         else:
-            sel_name = st.selectbox('종목 선택', options=list(results.keys()))
-            new_code = results[sel_name]
-            st.info(f'✅ {sel_name} ({new_code})')
+            opt_labels = [f'{n} ({c})' for c,n in results.items()]
+            sel = st.selectbox('종목 선택', options=opt_labels)
+            sel_code = list(results.keys())[opt_labels.index(sel)]
+            sel_name = results[sel_code]
             if st.button('📊 분석 시작', type='primary', key='analyze_sel'):
-                _run_analysis(new_code, sel_name, model, scalers, featured_data)
-
-    with st.expander('종목코드 직접 입력'):
-        mc = st.text_input('종목코드', placeholder='예: 068270')
-        mn = st.text_input('종목명',   placeholder='예: 셀트리온')
-        if st.button('📊 분석', key='manual'):
-            if mc:
-                _run_analysis(mc.strip(), mn.strip() or mc.strip(), model, scalers, featured_data)
+                _run_analysis(sel_code, sel_name, model, scalers, featured_data)
 
 # ── 탭3: 내 보유 주식 ──
 with tab3:
     st.subheader('💼 내 보유 주식 관리')
     if 'portfolio' not in st.session_state:
         st.session_state.portfolio = load_portfolio()
-    portfolio = st.session_state.portfolio
 
-    with st.expander('➕ 종목 추가 / 수정', expanded=len(portfolio)==0):
-        trained_stocks = load_trained_stocks()
-        all_stock_opts = {f'{name} ({code})': code for code,name in trained_stocks.items()}
-        c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
-        with c1:
-            add_label = st.selectbox('종목', options=list(all_stock_opts.keys()), key='add_stock', label_visibility='collapsed')
-            add_code  = all_stock_opts[add_label]
-            add_name  = add_label.split('(')[0].strip()
+    all_stocks = get_kospi_all_stocks()
+    with st.expander('➕ 종목 추가 / 수정', expanded=len(st.session_state.portfolio)==0):
+        # 종목 검색으로 추가
+        add_query = st.text_input('종목명 또는 코드 검색', placeholder='예: 삼성전자', key='add_query')
+        add_results = search_stock(add_query) if add_query else {}
+        if add_results:
+            opt_labels = [f'{n} ({c})' for c,n in add_results.items()]
+            add_sel    = st.selectbox('종목 선택', options=opt_labels, key='add_sel')
+            add_code   = list(add_results.keys())[opt_labels.index(add_sel)]
+            add_name   = add_results[add_code]
+        else:
+            add_code, add_name = None, None
+
+        c2, c3, c4 = st.columns([2, 2, 1])
         with c2:
-            add_total = st.number_input('총매입금액', min_value=0, step=10000, key='add_total', label_visibility='collapsed', placeholder='총 매입금액 (원)')
+            add_total = st.number_input('총매입금액 (원)', min_value=0, step=10000, key='add_total')
         with c3:
-            add_qty = st.number_input('수량', min_value=0, step=1, key='add_qty', label_visibility='collapsed', placeholder='수량 (주)')
+            add_qty = st.number_input('수량 (주)', min_value=0, step=1, key='add_qty')
         with c4:
-            st.write('')
-            save_btn = st.button('💾', key='save_stock', type='primary', use_container_width=True)
-        st.caption(f'종목  |  총매입금액(원)  |  수량(주)  |  저장')
-        if add_total > 0 and add_qty > 0:
+            st.write(''); save_btn = st.button('💾 저장', key='save_stock', type='primary')
+
+        if add_total > 0 and add_qty > 0 and add_code:
             st.caption(f'→ 주당 평균단가: {int(add_total/add_qty):,}원')
         if save_btn:
-            if add_total > 0 and add_qty > 0:
+            if add_code and add_total > 0 and add_qty > 0:
                 avg_price = add_total / add_qty
                 current_portfolio = load_portfolio()
                 current_portfolio[add_code] = {
@@ -684,7 +762,7 @@ with tab3:
                 st.success(f'✅ {add_name} 저장 완료!')
                 st.rerun()
             else:
-                st.error('금액과 수량을 입력하세요.')
+                st.error('종목 선택 후 금액과 수량을 입력하세요.')
 
     portfolio = load_portfolio()
     if portfolio:
@@ -699,12 +777,13 @@ with tab3:
                 save_portfolio(portfolio)
                 st.session_state.portfolio = portfolio
                 st.rerun()
+    else:
+        st.info('보유 종목을 추가해주세요. 위 ➕ 버튼을 눌러 종목을 등록하세요.')
 
     st.divider()
-
     portfolio = load_portfolio()
     if not portfolio:
-        st.info('보유 종목을 추가해주세요.')
+        st.info('보유 종목이 없습니다.')
     else:
         if st.button('🔄 현황 새로고침', type='primary'):
             st.rerun()
@@ -740,8 +819,9 @@ with tab3:
                     '수량': f'{qty}주', '총매입': f'{int(total_buy):,}원',
                     '현재가': f'{int(close_now):,}원', '평가금액': f'{eval_amt:,}원',
                     '손익': f'{pnl:+,}원', '수익률': f'{pnl_pct:+.1f}%',
-                    f'ATR×{atr_mult:.1f}손절': f'{int(stop_atr):,}원',
+                    f'ATR손절': f'{int(stop_atr):,}원',
                     '10일손절': f'{int(stop_10low):,}원',
+                    '20일손절': f'{int(stop_20low):,}원',
                     'DL신호': f'{latest_signal}({latest_prob:.0%})',
                     '상태': stop_hit,
                 })
@@ -749,14 +829,12 @@ with tab3:
                 summary_rows.append({
                     '종목': name, '주당단가': f'{int(buy_price):,}원',
                     '수량': f'{qty}주', '총매입': f'{int(total_buy):,}원',
-                    '현재가': '조회실패', '평가금액': '-',
-                    '손익': '-', '수익률': '-',
-                    'ATR손절': '-', '10일손절': '-',
+                    '현재가': '조회실패', '평가금액': '-', '손익': '-', '수익률': '-',
+                    'ATR손절': '-', '10일손절': '-', '20일손절': '-',
                     'DL신호': '-', '상태': f'❌{e}',
                 })
 
         st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
-
         try:
             total_buy_sum  = sum(info.get('total', info['price']*info['qty']) for info in portfolio.values())
             total_eval_sum = sum(detail_data[c]['close_now'] * portfolio[c]['qty'] for c in detail_data)
@@ -766,19 +844,16 @@ with tab3:
             m1.metric('총 매입금액', f'{int(total_buy_sum):,}원')
             m2.metric('총 평가금액', f'{int(total_eval_sum):,}원')
             m3.metric('총 손익', f'{int(total_pnl):+,}원')
-            m4.metric('총 수익률', f'{total_pct:+.1f}%',
-                      delta_color='normal' if total_pct>=0 else 'inverse')
+            m4.metric('총 수익률', f'{total_pct:+.1f}%', delta_color='normal' if total_pct>=0 else 'inverse')
         except:
             pass
 
         st.divider()
         st.subheader('📊 종목별 상세')
         for code, info in portfolio.items():
-            if code not in detail_data:
-                continue
-            d = detail_data[code]
-            name = info['name']
-            with st.expander(f"{name} ({code})  |  {d['latest_signal']}  |  현재가 {int(d['close_now']):,}원  |  상태 {'⚠️손절' if d['close_now']<=d['stop_atr'] else '✅정상'}"):
+            if code not in detail_data: continue
+            d = detail_data[code]; name = info['name']
+            with st.expander(f"{name} ({code})  |  {d['latest_signal']}  |  현재가 {int(d['close_now']):,}원  |  {'⚠️손절' if d['close_now']<=d['stop_atr'] else '✅정상'}"):
                 mc1, mc2, mc3 = st.columns(3)
                 mc1.metric('현재가', f"{int(d['close_now']):,}원")
                 mc1.metric('DL 확률', f"{d['latest_prob']:.1%}")
@@ -799,17 +874,28 @@ with tab3:
 # ── 탭4: 백테스트 ──
 with tab4:
     st.subheader('🧪 백테스트 — 매수 후 손절까지 수익률 시뮬레이션')
+    atr_mult = st.session_state.get('atr_mult', 2.0)
+    gap_slip = st.session_state.get('gap_slip', True)
 
-    atr_mult  = st.session_state.get('atr_mult', 2.0)
-    gap_slip  = st.session_state.get('gap_slip', True)
-
-    trained_stocks = load_trained_stocks()
     c1, c2, c3 = st.columns(3)
     with c1:
-        bt_opts  = {f'{n} ({c})': c for c,n in trained_stocks.items() if c in featured_data}
-        bt_label = st.selectbox('종목', options=list(bt_opts.keys()), key='bt_stock')
-        bt_code  = bt_opts[bt_label]
-        bt_name  = bt_label.split('(')[0].strip()
+        bt_query = st.text_input('종목명 또는 코드', placeholder='예: 삼성전자 또는 005930', key='bt_query')
+        if bt_query:
+            bt_found = search_stock(bt_query)
+            if bt_found:
+                bt_opt_labels = [f'{n} ({c})' for c,n in bt_found.items()]
+                bt_sel_label  = st.selectbox('종목 선택', options=bt_opt_labels, key='bt_sel')
+                bt_code = list(bt_found.keys())[bt_opt_labels.index(bt_sel_label)]
+                bt_name = bt_found[bt_code]
+            else:
+                st.warning('검색 결과 없음'); st.stop()
+        else:
+            bt_opts = {f'{n} ({c})': c for c,n in get_kospi_all_stocks().items() if c in featured_data}
+            if not bt_opts:
+                st.warning('학습된 종목이 없습니다.'); st.stop()
+            bt_sel_label = st.selectbox('종목 선택', options=list(bt_opts.keys()), key='bt_sel_all')
+            bt_code = bt_opts[bt_sel_label]
+            bt_name = bt_sel_label.split('(')[0].strip()
     with c2:
         from datetime import date, timedelta
         bt_start = st.date_input('매수일', value=date(2025,1,2), key='bt_start')
@@ -822,18 +908,24 @@ with tab4:
     if '기간 만료' in bt_stop_type:
         hold_days = st.slider('보유 기간 (거래일)', 1, 60, 20)
 
-    # 현재 사이드바 설정 표시
-    st.info(f'📌 현재 설정 — 임계값: **{THRESHOLD_PRED*100:.0f}%** | ATR 배수: **{atr_mult:.1f}배** | 갭다운 체결 반영: **{"ON" if gap_slip else "OFF"}**')
+    st.info(f'📌 임계값: **{THRESHOLD_PRED*100:.0f}%** | ATR 배수: **{atr_mult:.1f}배** | 갭다운 체결: **{"ON" if gap_slip else "OFF"}**')
 
     if st.button('🧪 백테스트 실행', type='primary'):
+        # 데이터 확보
+        if bt_code not in featured_data:
+            with st.spinner(f'{bt_name} 데이터 수집 중...'):
+                try:
+                    df_raw = get_raw_data(bt_code)
+                    featured_data[bt_code] = add_features(df_raw)
+                except Exception as e:
+                    st.error(f'데이터 수집 실패: {e}'); st.stop()
+
         df = featured_data.get(bt_code)
         if df is None:
             st.error('데이터 없음')
         else:
-            df_raw = df.copy()
-            df_raw.index = pd.to_datetime(df_raw.index)
+            df_raw = df.copy(); df_raw.index = pd.to_datetime(df_raw.index)
             bt_start_ts = pd.Timestamp(bt_start)
-
             avail = df_raw.index[df_raw.index >= bt_start_ts]
             if len(avail) == 0:
                 st.error('해당 날짜 이후 데이터 없음')
@@ -841,9 +933,7 @@ with tab4:
                 entry_dt    = avail[0]
                 entry_price = df_raw.loc[entry_dt, 'close']
                 entry_idx   = df_raw.index.get_loc(entry_dt)
-
-                # ── 손절가 계산 (매수일 기준 과거 데이터만 사용) ──
-                df_before = df_raw.iloc[:entry_idx+1]
+                df_before   = df_raw.iloc[:entry_idx+1]
                 tr = pd.concat([
                     df_before['high'] - df_before['low'],
                     (df_before['high'] - df_before['close'].shift()).abs(),
@@ -852,6 +942,9 @@ with tab4:
                 atr14_entry = tr.rolling(14).mean().iloc[-1]
 
                 if 'ATR' in bt_stop_type:
+                    if pd.isna(atr14_entry) or atr14_entry <= 0:
+                        st.error('ATR 계산 불가 — 매수일 이전 데이터가 부족합니다. 더 이후 날짜를 선택해주세요.')
+                        st.stop()
                     stop_price = entry_price - atr_mult * atr14_entry
                     stop_label = f'매수가({int(entry_price):,}) - {atr_mult:.1f}×ATR({int(atr14_entry):,})'
                 elif '10일' in bt_stop_type:
@@ -864,124 +957,110 @@ with tab4:
                     stop_price = None
                     stop_label = f'{hold_days}거래일 보유 후 청산'
 
-                # ── 청산 시점 탐색 (개선된 손절 로직) ──
                 df_after = df_raw.iloc[entry_idx+1:]
                 exit_dt, exit_price, exit_reason = None, None, None
                 slippage_note = ''
 
                 if hold_days:
-                    # 기간 만료 — 단, 손절 먼저 확인
-                    for dt, row in df_after.iterrows():
-                        # 갭다운 손절 체크 (시가가 손절가 아래로 시작)
+                    for idx_i, (dt, row) in enumerate(df_after.iterrows()):
                         if stop_price and row['open'] <= stop_price:
-                            exit_dt     = dt
-                            exit_price  = row['open']   # 시가 체결
-                            exit_reason = f'갭다운 시가 손절'
-                            slippage_note = f'⚠️ 갭다운: 손절가 {int(stop_price):,}원보다 낮은 시가 {int(row["open"]):,}원에 체결'
+                            exit_dt, exit_price = dt, row['open']
+                            exit_reason = '갭다운 시가 손절'
+                            slippage_note = f'⚠️ 갭다운: 손절가 {int(stop_price):,}원 → 시가 {int(row["open"]):,}원 체결'
                             break
-                        if df_after.index.get_loc(dt) >= hold_days - 1:
-                            exit_dt     = dt
-                            exit_price  = row['close']
-                            exit_reason = f'{hold_days}거래일 후 청산'
-                            break
+                        if idx_i >= hold_days - 1:
+                            exit_dt, exit_price = dt, row['close']
+                            exit_reason = f'{hold_days}거래일 후 청산'; break
                     if exit_dt is None:
-                        exit_dt     = df_after.index[-1]
-                        exit_price  = df_after['close'].iloc[-1]
-                        exit_reason = '데이터 끝'
+                        exit_dt = df_after.index[-1]; exit_price = df_after['close'].iloc[-1]; exit_reason = '데이터 끝'
                 else:
+                    trailing_stop = stop_price  # 초기 손절가
                     for dt, row in df_after.iterrows():
-                        # ① 갭다운: 시가가 손절가 아래로 시작 → 시가 체결 (실전 반영)
-                        if gap_slip and row['open'] <= stop_price:
-                            exit_dt     = dt
-                            exit_price  = row['open']
-                            exit_reason = f'갭다운 시가 손절'
-                            slippage_note = f'⚠️ 갭다운: 손절가 {int(stop_price):,}원 아래 시가({int(row["open"]):,}원) 체결'
+                        # 트레일링 스탑: 10일/20일 기준이면 매일 손절가 갱신
+                        if '10일' in bt_stop_type:
+                            idx_now = df_raw.index.get_loc(dt)
+                            trailing_stop = df_raw['low'].iloc[max(0, idx_now-10):idx_now].min()
+                        elif '20일' in bt_stop_type:
+                            idx_now = df_raw.index.get_loc(dt)
+                            trailing_stop = df_raw['low'].iloc[max(0, idx_now-20):idx_now].min()
+                        # ATR 트레일링: 매일 ATR 재계산 후 손절가 갱신
+                        if 'ATR' in bt_stop_type:
+                            idx_now = df_raw.index.get_loc(dt)
+                            df_slice = df_raw.iloc[max(0, idx_now-30):idx_now]
+                            tr_s = pd.concat([
+                                df_slice['high'] - df_slice['low'],
+                                (df_slice['high'] - df_slice['close'].shift()).abs(),
+                                (df_slice['low']  - df_slice['close'].shift()).abs()
+                            ], axis=1).max(axis=1)
+                            atr_now = tr_s.rolling(14).mean().iloc[-1]
+                            new_stop = row['close'] - atr_mult * atr_now
+                            # 손절가는 올라가기만 함 (내려가지 않음)
+                            trailing_stop = max(trailing_stop, new_stop)
+
+                        # 갭다운 체크
+                        if gap_slip and row['open'] <= trailing_stop:
+                            exit_dt, exit_price = dt, row['open']
+                            exit_reason = '갭다운 시가 손절'
+                            slippage_note = f'⚠️ 갭다운: 손절가 {int(trailing_stop):,}원 → 시가 {int(row["open"]):,}원 체결'
                             break
-                        # ② 일중 저가가 손절가 터치 → 손절가 체결
-                        if row['low'] <= stop_price:
-                            exit_dt     = dt
-                            exit_price  = stop_price
-                            exit_reason = f'손절 ({bt_stop_type})'
+                        # 일중 저가 터치
+                        if row['low'] <= trailing_stop:
+                            exit_dt, exit_price = dt, trailing_stop
+                            exit_reason = f'트레일링 손절 ({bt_stop_type})'
                             break
                     if exit_dt is None:
-                        exit_dt     = df_after.index[-1]
-                        exit_price  = df_after['close'].iloc[-1]
+                        exit_dt = df_after.index[-1]; exit_price = df_after['close'].iloc[-1]
                         exit_reason = '손절 미도달 (현재까지 보유)'
+                    stop_price = trailing_stop  # 최종 손절가 표시용
 
                 ret  = (exit_price - entry_price) / entry_price * 100
                 hold = len(df_raw.loc[entry_dt:exit_dt]) - 1
-
-                # 딥러닝 신호 확인
-                dates_arr, probs, signals = get_predictions(df, bt_code, model, scalers)
+                dates_arr, probs, _ = get_predictions(df, bt_code, model, scalers)
                 prob_on_entry = next((p for dt, p in zip(dates_arr, probs) if dt == entry_dt), 0.0)
 
-                # ── 결과 표시 ──
                 st.divider()
                 col1, col2, col3, col4 = st.columns(4)
                 col1.metric('매수일', entry_dt.strftime('%Y.%m.%d'))
                 col1.metric('매수가', f'{int(entry_price):,}원')
-                col2.metric('청산일', exit_dt.strftime('%Y.%m.%d') if exit_dt else '-')
+                col2.metric('청산일', exit_dt.strftime('%Y.%m.%d'))
                 col2.metric('청산가', f'{int(exit_price):,}원')
-                col3.metric('수익률', f'{ret:+.1f}%',
-                            delta_color='normal' if ret>=0 else 'inverse')
+                col3.metric('수익률', f'{ret:+.1f}%', delta_color='normal' if ret>=0 else 'inverse')
                 col3.metric('보유기간', f'{hold}거래일')
                 col4.metric('청산 이유', exit_reason)
-                col4.metric('딥러닝 확률 (매수일)', f'{prob_on_entry:.1%}',
+                col4.metric('DL 확률 (매수일)', f'{prob_on_entry:.1%}',
                             '신호 있음' if prob_on_entry>=THRESHOLD_PRED else '신호 없음')
-
                 if stop_price:
                     loss_pct = (stop_price - entry_price) / entry_price * 100
                     st.caption(f'📌 손절 기준: {stop_label}')
                     st.caption(f'📌 이론 손절가: {int(stop_price):,}원  ({loss_pct:.1f}%)')
-                    if slippage_note:
-                        st.warning(slippage_note)
-                    actual_loss_pct = (exit_price - entry_price) / entry_price * 100
-                    if actual_loss_pct < loss_pct:
-                        st.error(f'🔻 갭다운 슬리피지 손실: {actual_loss_pct - loss_pct:.1f}%p 추가 손실')
+                    if slippage_note: st.warning(slippage_note)
 
-                # ── 백테스트 차트 ──
                 chart_start = pd.Timestamp(bt_start) - pd.Timedelta(days=10)
-                chart_end   = exit_dt + pd.Timedelta(days=5) if exit_dt else pd.Timestamp(date.today())
+                chart_end   = exit_dt + pd.Timedelta(days=5)
                 df_chart = df_raw.loc[(df_raw.index >= chart_start) & (df_raw.index <= chart_end)].copy()
                 n = len(df_chart); xs = list(range(n))
                 dt_to_x = {dt:i for i,dt in enumerate(df_chart.index)}
                 dt_labels = [d.strftime('%m.%d') for d in df_chart.index]
-
                 fig, ax = plt.subplots(figsize=(14,5))
                 for i,(dt,row) in enumerate(df_chart.iterrows()):
                     c = '#E74C3C' if row['close']>=row['open'] else '#3498DB'
                     ax.plot([i,i],[row['low'],row['high']],color=c,linewidth=0.8,alpha=0.8)
-                    ax.bar(i,abs(row['close']-row['open']),
-                           bottom=min(row['open'],row['close']),color=c,alpha=0.8,width=0.6)
+                    ax.bar(i,abs(row['close']-row['open']),bottom=min(row['open'],row['close']),color=c,alpha=0.8,width=0.6)
                 ax.plot(xs, df_chart['close'].values, color='#333333', linewidth=1.1, alpha=0.6, label='종가')
-
                 if entry_dt in dt_to_x:
-                    ax.scatter(dt_to_x[entry_dt], entry_price*1.015,
-                               marker='v', s=200, color='#27AE60', zorder=7, label=f'매수 {int(entry_price):,}원')
+                    ax.scatter(dt_to_x[entry_dt], entry_price*1.015, marker='v', s=200, color='#27AE60', zorder=7, label=f'매수 {int(entry_price):,}원')
                 if exit_dt and exit_dt in dt_to_x:
-                    marker_c = '#E74C3C' if ret < 0 else '#27AE60'
-                    ax.scatter(dt_to_x[exit_dt], exit_price*0.985,
-                               marker='^', s=200, color=marker_c, zorder=7, label=f'청산 {int(exit_price):,}원')
-
+                    ax.scatter(dt_to_x[exit_dt], exit_price*0.985, marker='^', s=200,
+                               color='#E74C3C' if ret<0 else '#27AE60', zorder=7, label=f'청산 {int(exit_price):,}원')
                 if stop_price:
-                    ax.axhline(stop_price, color='#E74C3C', linestyle='--',
-                               linewidth=1.5, label=f'이론 손절가 {int(stop_price):,}원')
-                    # 갭다운으로 실제 체결가가 다를 때 별도 표시
-                    if gap_slip and exit_price != stop_price and '갭다운' in exit_reason:
-                        ax.axhline(exit_price, color='#E67E22', linestyle=':',
-                                   linewidth=1.5, label=f'실제 체결가 {int(exit_price):,}원')
-
+                    ax.axhline(stop_price, color='#E74C3C', linestyle='--', linewidth=1.5, label=f'손절가 {int(stop_price):,}원')
                 if entry_dt in dt_to_x and exit_dt and exit_dt in dt_to_x:
-                    ax.axvspan(dt_to_x[entry_dt], dt_to_x[exit_dt],
-                               alpha=0.08, color='#27AE60' if ret>=0 else '#E74C3C')
-
-                ax.set_title(f'{bt_name} 백테스트 | 수익률: {ret:+.1f}% | {exit_reason}',
-                             fontsize=13, fontweight='bold')
+                    ax.axvspan(dt_to_x[entry_dt], dt_to_x[exit_dt], alpha=0.08, color='#27AE60' if ret>=0 else '#E74C3C')
+                ax.set_title(f'{bt_name} 백테스트 | 수익률: {ret:+.1f}% | {exit_reason}', fontsize=13, fontweight='bold')
                 ax.legend(fontsize=9); ax.grid(axis='y', alpha=0.2)
                 ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x,_: f'{int(x):,}'))
                 tick_step = max(1, n//12)
-                ax.set_xticks(xs[::tick_step])
-                ax.set_xticklabels(dt_labels[::tick_step], rotation=30, fontsize=9)
+                ax.set_xticks(xs[::tick_step]); ax.set_xticklabels(dt_labels[::tick_step], rotation=30, fontsize=9)
                 ax.set_xlim(-0.8, n-0.2)
                 plt.tight_layout(); st.pyplot(fig); plt.close()
 
@@ -989,121 +1068,80 @@ with tab4:
 with tab5:
     st.subheader('🤖 자동 성능 점검 & 모델 개선 시스템')
     st.info('''
-    이 탭은 모델이 얼마나 잘 작동하는지 스스로 점검합니다.
     - **정확도 점검**: 과거 신호가 실제로 맞았는지 검증
     - **신호 품질 분석**: 확률별 실제 수익률 분포
     - **재학습 권고**: 정확도가 기준 이하면 자동 알림
     ''')
-
     if st.button('🔍 성능 점검 시작', type='primary'):
-        trained_stocks = load_trained_stocks()
         all_results = []
+        codes_to_check = list(featured_data.keys())
         prog = st.progress(0)
-        for i,(code,name) in enumerate(trained_stocks.items()):
-            prog.progress((i+1)/len(trained_stocks), text=f'{name} 점검 중...')
-            if code not in featured_data:
-                continue
+        for i, code in enumerate(codes_to_check):
+            name = get_kospi_all_stocks().get(code, code)
+            prog.progress((i+1)/len(codes_to_check), text=f'{name} 점검 중... {i+1}/{len(codes_to_check)}')
             try:
                 df = featured_data[code]
                 dates_arr, probs, signals = get_predictions(df, code, model, scalers)
                 df_raw = df.copy(); df_raw.index = pd.to_datetime(df_raw.index)
                 for dt, prob, sig in zip(dates_arr, probs, signals):
                     idx = df_raw.index.get_loc(dt) if dt in df_raw.index else None
-                    if idx is None or idx+FUTURE_DAYS >= len(df_raw):
-                        continue
+                    if idx is None or idx+FUTURE_DAYS >= len(df_raw): continue
                     future_price = df_raw['close'].iloc[idx+FUTURE_DAYS]
                     curr_price   = df_raw['close'].iloc[idx]
                     actual_ret   = (future_price - curr_price) / curr_price * 100
-                    actual_up    = actual_ret >= RISE_THRESHOLD*100
                     all_results.append({
                         'code': code, 'name': name, 'date': dt,
                         'prob': prob, 'signal': sig,
-                        'actual_ret': actual_ret, 'actual_up': actual_up,
+                        'actual_ret': actual_ret,
+                        'actual_up': actual_ret >= RISE_THRESHOLD*100,
                     })
-            except:
-                pass
+            except: pass
         prog.empty()
 
         if not all_results:
             st.error('점검 데이터 없음')
         else:
-            df_res = pd.DataFrame(all_results)
+            df_res  = pd.DataFrame(all_results)
             sig_df  = df_res[df_res['signal']]
             overall_acc = sig_df['actual_up'].mean() if len(sig_df) > 0 else 0
-            total_sig   = len(sig_df)
-            avg_ret_sig = sig_df['actual_ret'].mean() if len(sig_df) > 0 else 0
-            avg_ret_all = df_res['actual_ret'].mean()
-
             st.divider()
             m1,m2,m3,m4 = st.columns(4)
-            m1.metric('매수신호 정확도', f'{overall_acc:.1%}',
-                      '✅ 양호' if overall_acc>=0.55 else '⚠️ 개선 필요')
-            m2.metric('총 신호 횟수', f'{total_sig}회')
-            m3.metric('신호 시 평균 수익률', f'{avg_ret_sig:+.1f}%')
-            m4.metric('전체 평균 수익률', f'{avg_ret_all:+.1f}%')
+            m1.metric('매수신호 정확도', f'{overall_acc:.1%}', '✅ 양호' if overall_acc>=0.55 else '⚠️ 개선 필요')
+            m2.metric('총 신호 횟수', f'{len(sig_df)}회')
+            m3.metric('신호 시 평균 수익률', f'{sig_df["actual_ret"].mean():+.1f}%' if len(sig_df)>0 else '-')
+            m4.metric('전체 평균 수익률', f'{df_res["actual_ret"].mean():+.1f}%')
 
             if overall_acc < 0.55:
                 st.error('⚠️ 모델 정확도가 55% 미만입니다. 재학습을 권장합니다.')
                 if st.button('🔄 즉시 재학습', type='secondary'):
                     for f in [MODEL_PATH, SCALER_PATH]:
                         if os.path.exists(f): os.remove(f)
-                    st.cache_resource.clear()
-                    st.rerun()
+                    st.cache_resource.clear(); st.rerun()
             else:
                 st.success('✅ 모델 성능이 양호합니다.')
 
-            st.subheader('📊 확률 구간별 실제 정확도')
-            bins = [(0.5,0.6),(0.6,0.7),(0.7,0.8),(0.8,0.9),(0.9,1.0)]
+            st.subheader('📊 확률 구간별 정확도')
             bin_rows = []
-            for lo,hi in bins:
+            for lo,hi in [(0.5,0.6),(0.6,0.7),(0.7,0.8),(0.8,0.9),(0.9,1.0)]:
                 sub = df_res[(df_res['prob']>=lo)&(df_res['prob']<hi)]
-                if len(sub) == 0: continue
-                bin_rows.append({
-                    '확률 구간': f'{lo*100:.0f}~{hi*100:.0f}%',
-                    '신호 횟수': len(sub),
-                    '실제 상승': f"{sub['actual_up'].sum()}회",
-                    '정확도': f"{sub['actual_up'].mean():.1%}",
-                    '평균 수익률': f"{sub['actual_ret'].mean():+.1f}%",
-                    '최대 수익': f"{sub['actual_ret'].max():+.1f}%",
-                    '최대 손실': f"{sub['actual_ret'].min():+.1f}%",
-                })
-            if bin_rows:
-                st.dataframe(pd.DataFrame(bin_rows), use_container_width=True)
-
-            st.subheader('📋 종목별 신호 성과')
-            stock_rows = []
-            for code in trained_stocks:
-                sub = df_res[(df_res['code']==code)&(df_res['signal'])]
                 if len(sub)==0: continue
-                stock_rows.append({
-                    '종목': trained_stocks[code],
-                    '신호 횟수': len(sub),
-                    '정확도': f"{sub['actual_up'].mean():.1%}",
-                    '평균 수익률': f"{sub['actual_ret'].mean():+.1f}%",
-                    '승률': f"{(sub['actual_ret']>0).mean():.1%}",
-                })
-            if stock_rows:
-                st.dataframe(pd.DataFrame(stock_rows), use_container_width=True)
+                bin_rows.append({'확률 구간':f'{lo*100:.0f}~{hi*100:.0f}%','신호 횟수':len(sub),
+                                 '정확도':f"{sub['actual_up'].mean():.1%}",'평균 수익률':f"{sub['actual_ret'].mean():+.1f}%",
+                                 '최대 수익':f"{sub['actual_ret'].max():+.1f}%",'최대 손실':f"{sub['actual_ret'].min():+.1f}%"})
+            if bin_rows: st.dataframe(pd.DataFrame(bin_rows), use_container_width=True)
 
             st.subheader('⚙️ 최적 임계값 탐색')
-            best_thresh, best_acc, best_ret = THRESHOLD_PRED, 0, 0
+            best_thresh, best_acc = THRESHOLD_PRED, 0
             thresh_rows = []
             for thresh in [0.5,0.55,0.6,0.65,0.7,0.75,0.8,0.85,0.9]:
                 sub = df_res[df_res['prob']>=thresh]
                 if len(sub) < 10: continue
                 acc = sub['actual_up'].mean()
-                ret = sub['actual_ret'].mean()
-                thresh_rows.append({
-                    '임계값': f'{thresh*100:.0f}%',
-                    '신호 횟수': len(sub),
-                    '정확도': f'{acc:.1%}',
-                    '평균 수익률': f'{ret:+.1f}%',
-                    '현재 선택': '✅' if abs(thresh - THRESHOLD_PRED) < 0.01 else '',
-                })
-                if acc > best_acc:
-                    best_acc, best_thresh, best_ret = acc, thresh, ret
+                thresh_rows.append({'임계값':f'{thresh*100:.0f}%','신호 횟수':len(sub),
+                                    '정확도':f'{acc:.1%}','평균 수익률':f"{sub['actual_ret'].mean():+.1f}%",
+                                    '현재 선택':'✅' if abs(thresh-THRESHOLD_PRED)<0.01 else ''})
+                if acc > best_acc: best_acc, best_thresh = acc, thresh
             if thresh_rows:
                 st.dataframe(pd.DataFrame(thresh_rows), use_container_width=True)
-                st.success(f'🎯 최적 임계값: **{best_thresh*100:.0f}%** '
-                           f'(정확도 {best_acc:.1%}, 평균수익률 {best_ret:+.1f}%)')
+                st.success(f'🎯 최적 임계값: **{best_thresh*100:.0f}%** (정확도 {best_acc:.1%})')
                 st.info(f'💡 사이드바 슬라이더에서 임계값을 **{best_thresh*100:.0f}%** 로 조정해보세요.')
