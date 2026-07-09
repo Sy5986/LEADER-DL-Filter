@@ -633,6 +633,12 @@ def draw_turtle_chart(df_raw, code, name, model, scalers):
     latest_prob   = probs[-1]
     latest_signal = '🟢 매수 신호' if latest_prob >= THRESHOLD_PRED else '🔴 비신호'
 
+    # 매수 신호 발생 시 추적 테이블에 자동 저장
+    if latest_prob >= THRESHOLD_PRED:
+        latest_date  = df_raw.index[-1]
+        latest_price = df_raw['close'].iloc[-1]
+        save_signal_tracking(code, name, latest_date, latest_price, latest_prob)
+
     fig,(ax1,ax2) = plt.subplots(2,1,figsize=(14,8),gridspec_kw={'height_ratios':[3,1.5]})
     plt.subplots_adjust(hspace=0.08)
     fig.suptitle(f'🐢 {name} ({code})  |  최근 20일  |  터틀 트레이딩 분석',fontsize=14,fontweight='bold')
@@ -736,6 +742,63 @@ def save_top20_to_supabase(df):
     except Exception as e:
         st.warning(f'Supabase 저장 실패: {e}')
 
+def save_signal_tracking(code, name, signal_date, signal_price, prob):
+    """매수 신호 발생 시 추적 테이블에 저장"""
+    try:
+        sb = get_supabase()
+        # 같은 날짜 같은 종목 중복 방지
+        existing = sb.table('signal_tracking').select('id')\
+            .eq('code', code).eq('signal_date', str(signal_date)).execute()
+        if existing.data:
+            return
+        sb.table('signal_tracking').insert({
+            'code': code, 'name': name,
+            'signal_date': str(signal_date),
+            'signal_price': int(signal_price),
+            'prob': float(prob),
+            'checked': False,
+        }).execute()
+    except Exception as e:
+        pass
+
+def update_signal_results():
+    """5일 후 실제 수익률 업데이트"""
+    try:
+        sb  = get_supabase()
+        res = sb.table('signal_tracking').select('*')\
+            .eq('checked', False).execute()
+        if not res.data:
+            return 0
+        updated = 0
+        for row in res.data:
+            signal_dt = pd.Timestamp(row['signal_date'])
+            # 5거래일 후 확인
+            if pd.Timestamp.now() < signal_dt + pd.Timedelta(days=8):
+                continue
+            try:
+                df_raw = get_raw_data(row['code'])
+                df_raw.index = pd.to_datetime(df_raw.index)
+                after = df_raw[df_raw.index > signal_dt]
+                if len(after) < FUTURE_DAYS:
+                    continue
+                result_price = int(after['close'].iloc[FUTURE_DAYS-1])
+                result_date  = after.index[FUTURE_DAYS-1].date()
+                actual_ret   = (result_price - row['signal_price']) / row['signal_price'] * 100
+                is_correct   = actual_ret >= RISE_THRESHOLD * 100
+                sb.table('signal_tracking').update({
+                    'result_price': result_price,
+                    'result_date': str(result_date),
+                    'actual_ret': round(float(actual_ret), 2),
+                    'is_correct': bool(is_correct),
+                    'checked': True,
+                }).eq('id', row['id']).execute()
+                updated += 1
+            except:
+                pass
+        return updated
+    except:
+        return 0
+    
 def send_signal_email(top20_df):
     """매수 신호 TOP 20을 이메일로 발송"""
     import smtplib
@@ -1316,6 +1379,51 @@ with tab5:
                 st.dataframe(pd.DataFrame(thresh_rows), use_container_width=True)
                 st.success(f'🎯 최적 임계값: **{best_thresh*100:.0f}%** (정확도 {best_acc:.1%})')
                 st.info(f'💡 사이드바 슬라이더에서 임계값을 **{best_thresh*100:.0f}%** 로 조정해보세요.')
+
+st.divider()
+    st.subheader('📡 신호 추적 현황')
+
+    # 5일 후 결과 업데이트
+    if st.button('🔄 결과 업데이트', key='update_tracking'):
+        with st.spinner('5일 후 수익률 업데이트 중...'):
+            updated = update_signal_results()
+            st.success(f'✅ {updated}개 신호 업데이트 완료')
+
+    try:
+        sb  = get_supabase()
+        res = sb.table('signal_tracking').select('*')\
+            .order('signal_date', desc=True).limit(50).execute()
+        if res.data:
+            df_track = pd.DataFrame(res.data)
+            # 완료된 신호만 정확도 계산
+            done = df_track[df_track['checked'] == True]
+            if len(done) > 0:
+                acc = done['is_correct'].mean()
+                avg_ret = done['actual_ret'].mean()
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric('실시간 정확도', f'{acc:.1%}')
+                m2.metric('평균 수익률', f'{avg_ret:+.1f}%')
+                m3.metric('추적 완료', f'{len(done)}회')
+                m4.metric('추적 중', f'{len(df_track)-len(done)}회')
+
+            # 테이블 표시
+            display_rows = []
+            for _, row in df_track.iterrows():
+                display_rows.append({
+                    '종목': row['name'],
+                    '신호일': row['signal_date'],
+                    '신호가': f"{int(row['signal_price']):,}원",
+                    '확률': f"{float(row['prob']):.1%}",
+                    '결과가': f"{int(row['result_price']):,}원" if row['result_price'] else '추적 중',
+                    '수익률': f"{float(row['actual_ret']):+.1f}%" if row['actual_ret'] else '-',
+                    '결과': '✅' if row['is_correct'] else ('❌' if row['checked'] else '⏳'),
+                })
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True)
+        else:
+            st.info('아직 추적된 신호가 없습니다. 종목 분석 시 매수 신호가 발생하면 자동으로 기록됩니다.')
+    except Exception as e:
+        st.error(f'추적 데이터 로드 실패: {e}')
+                        
 # ── 탭6: 매수 신호 TOP 20 ──
 with tab6:
     st.subheader('🏆 매수 신호 TOP 20')
@@ -1364,8 +1472,8 @@ if st.button('🔄 전체 종목 스캔 (약 10~20분)', type='primary'):
         save_top20_to_supabase(df_result)
         df_top20 = df_result
         st.success(f'✅ 스캔 완료 — {len(results)}개 종목 중 TOP 20 선정')
-            if st.button('📧 이메일로 받기', key='send_email'):
-                send_signal_email(df_result)
+        if st.button('📧 이메일로 받기', key='send_email'):
+            send_signal_email(df_result)
     else:
         st.error('스캔 결과 없음')
 
