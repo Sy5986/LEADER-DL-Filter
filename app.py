@@ -1380,7 +1380,7 @@ with tab5:
                 st.success(f'🎯 최적 임계값: **{best_thresh*100:.0f}%** (정확도 {best_acc:.1%})')
                 st.info(f'💡 사이드바 슬라이더에서 임계값을 **{best_thresh*100:.0f}%** 로 조정해보세요.')
 
-st.divider()
+    st.divider()
     st.subheader('📡 신호 추적 현황')
 
     # 5일 후 결과 업데이트
