@@ -1463,6 +1463,10 @@ if st.button('🔄 전체 종목 스캔 (약 10~20분)', type='primary'):
                 'stop_20low': int(stop_20low),
                 'signal': '🟢 매수' if latest_prob >= THRESHOLD_PRED else '🟡 관심',
             })
+            # 매수 신호 종목 자동 추적 저장
+            if latest_prob >= THRESHOLD_PRED:
+                latest_date = df.index[-1]
+                save_signal_tracking(code, name, latest_date, int(close_now), latest_prob)
         except:
             pass
     pb.empty()
