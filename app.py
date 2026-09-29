@@ -34,7 +34,7 @@ set_korean_font()
 # 설정
 # ============================================================
 SUPABASE_URL = 'https://qdyzkekzjrzaupeplyxv.supabase.co'
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY', 'sb_secret_u1wuZY958fWHkqTX1qDGfw_tCQQYy7A')
+SUPABASE_KEY = os.environ.get('SUPABASE_KEY', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFkeXprZWt6anJ6YXVwZXBseXh2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIzMzE1MDAsImV4cCI6MjA5NzkwNzUwMH0.VG3767UJayU_sC7Dl4HUZzojnk4pZEEcYZUgSwfjOuU')
 USE_SUPABASE = True
 LOOKBACK       = 20
 FUTURE_DAYS    = 5
